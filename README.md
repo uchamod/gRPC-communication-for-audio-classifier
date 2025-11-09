@@ -193,10 +193,6 @@ flutter run
 
 ---
 
-## 📸 UI Preview
-
-*(Add screenshots or GIFs here later)*
-
 ---
 
 ## 🔒 Security Notes
@@ -224,11 +220,4 @@ flutter run
 
 ---
 
-## 🪪 License
 
-This project is licensed under the [MIT License](LICENSE).
-
----
-
-Would you like me to include a **README diagram (PNG)** showing the architecture (Flutter ↔ gRPC ↔ Flask ↔ YAMNet)?
-It’ll make your GitHub project visually appealing and easy to understand.
