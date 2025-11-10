@@ -17,6 +17,7 @@ class MyApp extends StatelessWidget {
     );
   }
 }
+//to switch to new remote branch that not track in locally
 // git branch -m develop main
 // git fetch origin
 // git branch -u origin/main main
