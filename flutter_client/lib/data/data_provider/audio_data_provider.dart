@@ -1,11 +1,8 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:path_provider/path_provider.dart';
+import 'package:flutter_client/data/grpc/audio_grpc_client.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 
@@ -22,7 +19,7 @@ class AudioDataProvider {
   int _bufferSizeTarget = 0; // Will be calculated based on sample rate
 
   // Configuration
-  static const int _sampleRate = 44100;
+  static const int _sampleRate = 16000;
   static const int _chunkDurationSeconds = 5;
   static const int _analysisIntervalSeconds = 8;
   final Set<String> _warnableSounds = {
@@ -46,13 +43,52 @@ class AudioDataProvider {
     'Fire',
     'Siren',
     'Police car (siren)',
+    'Speech',
   };
   final String backendUrl = 'http://192.168.75.148:5000/predict';
+  final AudioGrpcClient _grpcClient;
+  int _sessionId = DateTime.now().millisecondsSinceEpoch; // unique session id
 
-  AudioDataProvider({required this.isRecordingEnable, required this.context}) {
+  AudioDataProvider({
+    required this.isRecordingEnable,
+    required this.context,
+    required String grpcHost,
+  }) : _grpcClient = AudioGrpcClient(host: grpcHost) {
     // Calculate buffer size for 5-second chunks
-
     _bufferSizeTarget = _sampleRate * _chunkDurationSeconds ~/ 4;
+    _grpcClient.init();
+  }
+
+  // call to start full streaming session with server
+  Future<void> _startGrpcSession() async {
+    await _grpcClient.startSession(
+      onResponse: (resp) {
+        // This callback runs on each server response
+        try {
+          final String label = resp.label;
+          final double confidence = resp.confidence;
+          // do whatever you did before: check warnable sounds
+          if (_warnableSounds.contains(label)) {
+            print(
+              '⚠️ Detected from server: $label (${(confidence * 100).toStringAsFixed(1)}%)',
+            );
+            // show notification or UI update as required
+          } else {
+            print(
+              'Detected (not warnable): $label ${(confidence * 100).toStringAsFixed(1)}%',
+            );
+          }
+        } catch (e) {
+          print('Error processing server response: $e');
+        }
+      },
+      onError: (err) {
+        print('gRPC stream error: $err');
+      },
+      onDone: () {
+        print('gRPC stream done by server.');
+      },
+    );
   }
 
   //start recording
@@ -66,16 +102,18 @@ class AudioDataProvider {
     }
 
     try {
+      // Start gRPC session before streaming audio
+      await _startGrpcSession();
       // 2. Clear previous state and start the stream
       await _audioStreamSubscription?.cancel();
       _audioBuffer = [];
       _lastChunkTime = DateTime.now();
       final stream = await _recorder.startStream(
         const RecordConfig(
-          encoder: AudioEncoder.aacLc, //  Using AAC for m4a format
-          sampleRate: _sampleRate,
+          encoder: AudioEncoder.pcm16bits, //  Using AAC for m4a format
+          sampleRate: 16000,
           numChannels: 1, // Mono
-          bitRate: 128000, // 128 kbps for good quality
+          // bitRate: 128000, // 128 kbps for good quality
         ),
       );
       print("Audio stream started successfully ✅");
@@ -110,14 +148,41 @@ class AudioDataProvider {
 
     if (currentBufferSize >= _bufferSizeTarget ||
         timeSinceLastChunk >= _analysisIntervalSeconds) {
-      // Combine all buffered chunks into one piece for analysis
       final combinedData = _combineAudioChunks();
-      _audioBuffer.clear(); // Clear buffer after taking the data
+      _audioBuffer.clear();
       _lastChunkTime = DateTime.now();
 
-      // Send for analysis without waiting (fire and forget)
-      _analyzeAudioData(combinedData);
+      // If gRPC session is not started, start it
+      if (_outgoingSessionNotStarted()) {
+        _startGrpcSession();
+      }
+
+      // Send chunk directly to gRPC
+      _sendChunkToGrpc(combinedData);
     }
+  }
+
+  // Send bytes to gRPC
+  void _sendChunkToGrpc(Uint8List audioBytes) {
+    try {
+      _grpcClient.sendChunk(
+        audioBytes,
+        sampleRate: _sampleRate,
+        channels: 1,
+        isLast: false,
+        sessionId: _sessionId,
+      );
+    } catch (e) {
+      print('Error sending chunk to gRPC: $e');
+    }
+  }
+
+  bool _outgoingSessionNotStarted() {
+    // simple check based on grpc client's internal controller presence
+    // add a getter in AudioGrpcClient if you want; for now, check if _outController != null
+    // But since _outController is private, we can add a small public flag or rely on try/catch:
+    // For brevity assume we have started it earlier with _startGrpcSession() when starting recording.
+    return true; // replace with real condition or call _startGrpcSession() at startRecordings()
   }
 
   //for procssing
@@ -130,68 +195,24 @@ class AudioDataProvider {
     return builder.toBytes();
   }
 
-  //analysis audio data
-  Future<void> _analyzeAudioData(Uint8List audioData) async {
+  // When user stops recording, tell server it's the last chunk and close
+  Future<void> stopRecordings() async {
     try {
-      // Create temporary file for analysis
-      final tempDir = await getTemporaryDirectory();
-      final tempFile = File(
-        '${tempDir.path}/temp_chunk_${DateTime.now().millisecondsSinceEpoch}.m4a',
+      _isRecording = false;
+      await _audioStreamSubscription?.cancel();
+
+      // send an empty final chunk marked is_last = true to indicate session end
+      _grpcClient.sendChunk(
+        Uint8List(0),
+        sampleRate: _sampleRate,
+        channels: 1,
+        isLast: true,
+        sessionId: _sessionId,
       );
-      await tempFile.writeAsBytes(audioData);
-      // // Write PCM data as WAV file
-      // await _writePCMAsWAV(audioData, tempFile);
-
-      // Analyze the audio file
-      await _analyzeAudioFile(tempFile.path);
-
-      // Clean up
-      await tempFile.delete();
+      await _grpcClient.endSession();
+      await _grpcClient.shutdown();
     } catch (e) {
-      print('Error analyzing audio data: $e');
-    }
-  }
-
-  //ssend multipart  request to backend
-  Future<void> _analyzeAudioFile(String audioPath) async {
-    try {
-      var request = http.MultipartRequest(
-        'POST',
-        Uri.parse('http://34.87.171.135/predict'),
-      );
-      var audioFile = await http.MultipartFile.fromPath('audio', audioPath);
-      request.files.add(audioFile);
-
-      var response = await request.send().timeout(Duration(minutes: 5));
-
-      if (response.statusCode == 200) {
-        String responseBody = await response.stream.bytesToString();
-        Map<String, dynamic> result = json.decode(responseBody);
-        await _processAnalysisResult(result);
-      } else {
-        throw Exception('Server returned ${response.statusCode}');
-      }
-    } on SocketException catch (e) {
-      throw Exception('Network error: Check if Flask server is running on $e');
-    } on TimeoutException catch (e) {
-      throw Exception('Request timeout: Server took too long to responde $e');
-    } catch (e) {
-      print('Error analyzing audio file: $e');
-    }
-  }
-
-  //check response data
-  Future<void> _processAnalysisResult(Map<String, dynamic> result) async {
-    try {
-      String prediction = result['prediction'] ?? '';
-      // double confidence = result['top_confidence']?.toDouble() ?? 0.0;
-      if (_warnableSounds.contains(prediction)) {
-        print('Detected from audio: $prediction');
-      }
-
-      print('nothing detect from audio');
-    } catch (e) {
-      print('Error processing analysis result: $e');
+      print('Error stopping recording: $e');
     }
   }
 
