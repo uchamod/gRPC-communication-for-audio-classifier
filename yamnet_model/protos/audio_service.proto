@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package ai;
+
+service AudioClassifier {
+  // Bidirectional streaming: client sends AudioChunk stream, server replies with PredictResponse stream
+  rpc StreamPredict (stream AudioChunk) returns (stream PredictResponse);
+}
+
+message AudioChunk {
+  bytes data = 1;           // raw bytes (agreed format: WAV or PCM bytes or container like m4a)
+  int32 sample_rate = 2;    // sample rate in Hz (e.g., 44100)
+  int32 channels = 3;       // number of channels
+  bool is_last = 4;         // true when final chunk for this session
+  int64 session_id = 5;     // optional session id (client-generated)
+}
+
+message PredictResponse {
+  string label = 1;         // predicted label (e.g., "Bark")
+  float confidence = 2;     // confidence 0.0 - 1.0
+  int64 timestamp_ms = 3;   // server timestamp for prediction (optional)
+  int64 session_id = 4;     // echo session id back
+}

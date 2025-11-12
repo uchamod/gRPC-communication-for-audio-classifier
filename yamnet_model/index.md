@@ -23,7 +23,7 @@ cd YOUR_REPO_NAME
 python3 -m venv venv
 
 # Activate virtual environment
-source venv/bin/activate
+source venv\bin\activate
 
 # Upgrade pip
 pip install --upgrade pip
@@ -238,4 +238,10 @@ sudo systemctl status flask-app
 
 # Monitor logs
 sudo journalctl -u flask-app -f
+
+# create proto files for grpc
+python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. protos/audio_service.proto
+
+# use global packages if needed
+python -m venv venv --system-site-packages
 

@@ -1,0 +1,3 @@
+{
+  "python.analysis.extraPaths": ["./yamnet_model/protos"]
+}
